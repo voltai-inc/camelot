@@ -7,6 +7,8 @@ from operator import itemgetter
 import numpy as np
 import pandas as pd
 
+from typing import Tuple, Union, List
+
 
 # minimum number of vertical textline intersections for a textedge
 # to be considered valid
@@ -283,6 +285,14 @@ class Cell:
         self.hspan = False
         self.vspan = False
         self._text = ""
+        self.is_main = False
+        self.is_header = False
+        self.is_row_header = False
+        self.is_subheader = False
+        self.subheaders = []
+        self.parent_header = []
+        self.element = None
+        self.is_bold = False
 
     def __repr__(self):
         x1 = round(self.x1)
@@ -339,11 +349,23 @@ class Table:
         self.rows = rows
         self.cells = [[Cell(c[0], r[1], c[1], r[0]) for c in cols] for r in rows]
         self.df = pd.DataFrame()
+        self.tagged_df = pd.DataFrame()
         self.shape = (0, 0)
         self.accuracy = 0
         self.whitespace = 0
         self.order = None
         self.page = None
+        self._bbox: Union[List, Tuple] = None
+        # scale bbox to image coordinates
+        self._image_bbox: Union[List, Tuple] = None
+        # bounding box using vision model
+        self._vision_bbox: Union[List, Tuple] = None
+        # is table merged with the table above or not?
+        self.is_merged: bool = False
+        # ignore the table or not? in case of any issue with the table, make this true
+        self.ignore: bool = False
+        self.parented: bool = False
+        self.title: str = None
 
     def __repr__(self):
         return f"<{self.__class__.__name__} shape={self.shape}>"
@@ -355,12 +377,68 @@ class Table:
         if self.page < other.page:
             return True
 
+
+    @property
+    def has_header(self):
+        for i in range(len(self.cells)):
+            row = self.cells[i]
+            for j in range(len(row)): 
+                cell = row[j]
+                if cell.is_header: 
+                    return True
+
     @property
     def data(self):
         """Returns two-dimensional list of strings in table."""
         d = []
         for row in self.cells:
             d.append([cell.text.strip() for cell in row])
+        return d
+    
+
+    def processed_data(self, tag: bool = False):
+        d = []
+        for i in range(len(self.cells)):
+            row_d = []
+            is_row_header = all(cell.is_header for cell in self.cells[i])
+            for j in range(len(self.cells[i])):
+                cell = self.cells[i][j]
+                if not cell.is_main and is_row_header:
+                    continue
+                if cell.is_subheader:
+                    continue
+
+                if cell.is_header:
+                    if not cell.subheaders:
+                        if tag:
+                            row_d.append(f"<bold>{cell.text.strip()}</bold>")
+                        else:
+                            row_d.append(cell.text.strip())
+                    else:
+                        for sub in cell.subheaders:
+                            sub_cell = self.cells[i + 1][sub]
+                            if tag:
+                                row_d.append(f"<bold>{cell.text.strip() + ' ' + sub_cell.text.strip()}</bold>")
+                            else:
+                                row_d.append(cell.text.strip() + ' ' + sub_cell.text.strip())
+                else:
+                    if i > 0 and cell.text.strip() == "" and not is_row_header and not cell.is_main and not self.cells[i - 1][j].is_header:
+                        if self.cells[i][j].vspan and not self.cells[i][j].top:
+                            self.cells[i][j]._text = self.cells[i - 1][j].text
+                            
+                    if j > 0 and self.cells[i][j].hspan and not self.cells[i][j].left and not self.cells[i][j - 1].is_row_header and not self.cells[i][j - 1].is_header:
+                        if self.cells[i][j - 1].text.strip() != "":
+                            self.cells[i][j]._text = self.cells[i][j - 1].text
+                    
+                    if cell.is_bold and tag:
+                        row_d.append(f"<bold>{cell.text.strip()}</bold>")
+                    else:
+                        row_d.append(cell.text.strip())
+
+            if any(row_d):
+                d.append(row_d)
+            
+
         return d
 
     @property
@@ -376,6 +454,25 @@ class Table:
             "page": self.page,
         }
         return report
+    
+
+    def find_footnotes(self):
+        def is_footnote(text):
+            return text in ["1)"] # todo: add regex here
+        for i in range(len(self.cells)):
+            row = self.cells[i]
+            for j in range(len(row)):
+                cell = self.cells[i][j]
+                if not "<s>" in cell.text:
+                    continue
+                splitted = cell.text.split("<s>")
+                print("text:", cell.text)
+                print("splitted:", splitted)
+                for i in range(1, len(splitted), 2):
+                    subscript = splitted[i].split("</s>")[0]
+                    # if is_footnote(subscript):
+                    print(subscript)
+                
 
     def set_all_edges(self):
         """Sets all table edges to True."""
